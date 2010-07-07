@@ -26,12 +26,13 @@ connect_to_endpoint(Endpoint) ->
     {ok, Channel, Exchange, Queue}.
 
 build_message({login, User, Pass}, Id) ->
-    list_to_binary(lists:flatten([
-                "id:", integer_to_list(Id), "\n",
-                "action:", "login", "\n",
-                "user:", binary_to_list(User), "\n",
-                "pass:", binary_to_list(Pass), "\n"])).
-        
+    {obj, [{id, Id}, {action, login}, {user, User}, {pass, Pass}]};
+
+build_message({vhost, User, Vhost}, Id) ->
+    {obj, [{id, Id}, {action, vhost}, {user, User}, {vhost, Vhost}]};
+
+build_message({resource_access, User, Vhost, Item, Permission}, Id) ->
+    {obj, [{id, Id}, {action, resource_access}, {user, User}, {vhost, Vhost}, {item, Item}, {permission, Permission}]}.
 
 send_request(State = #state{message_count = MessageCount, outstanding = Outstanding}, Id, From, Message) ->
     BP = #'basic.publish'{exchange = State#state.exchange},
@@ -40,18 +41,16 @@ send_request(State = #state{message_count = MessageCount, outstanding = Outstand
     NewState = State#state{message_count = MessageCount+1, outstanding = [{Id, From}|Outstanding]},
     {noreply, NewState}.
 
-parse_payload(Payload) ->
-    lists:foldl(
-        fun(X, Acc) ->
-            [Key,Value] = string:tokens(X, ":"),
-            [{Key, Value} | Acc]
-        end, [], string:tokens(Payload, "\n")).
-
-send_reply(State = #state{outstanding = Outstanding}, Reply) ->
-    Id = list_to_integer(proplists:get_value("id", Reply)),
+send_reply(#state{outstanding = Outstanding}, Reply) ->
+    Id = proplists:get_value("id", Reply),
     NewOutstanding = case lists:keytake(Id, 1, Outstanding) of
         {value, {Id, From}, NewList} ->
-            gen_server:reply(From, error),
+            case proplists:get_value("code", Reply) of
+                200 ->
+                    gen_server:reply(From, ok);
+                _   ->
+                    gen_server:reply(From, error)
+            end,
             NewList;
         _ -> Outstanding
     end,
@@ -93,10 +92,10 @@ init([]) ->
     io:format("State: ~p~n", [State]),
     {ok, State}.
 
-handle_call({login, User, Pass}, From, State = #state{message_count = MessageCount}) ->
+handle_call(Msg, From, State = #state{message_count = MessageCount}) ->
     Id = MessageCount + 1,
-    Message = build_message({login, User, Pass}, Id),
-    send_request(State, Id, From, Message);
+    Message = build_message(Msg, Id),
+    send_request(State, Id, From, list_to_binary(rfc4627:encode(Message)));
 
 handle_call(_Msg, _From, State) ->
     io:format("Call: ~p~n", [_Msg]),
@@ -106,9 +105,10 @@ handle_cast(_Msg, State) ->
     io:format("Cast: ~p~n", [_Msg]),
     {noreply, State}.
 
-handle_info({Header = #'basic.deliver'{}, Message = #amqp_msg{payload = Payload}}, State) ->
+handle_info({#'basic.deliver'{}, #amqp_msg{payload = Payload}}, State) ->
     io:format("Payload: ~p~n", [Payload]),
-    Reply = parse_payload(binary_to_list(Payload)),
+    {ok, {obj, Reply}, _} = rfc4627:decode(binary_to_list(Payload)),
+    io:format("Reply: ~p~n", [Reply]),
     NewOutstanding = send_reply(State, Reply),
     {noreply, State#state{outstanding = NewOutstanding}};
 

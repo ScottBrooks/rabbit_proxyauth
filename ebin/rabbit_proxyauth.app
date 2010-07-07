@@ -9,4 +9,4 @@
    {registered, []},
    {mod, {rabbit_proxyauth, []}},
    {env, []},
-   {applications, [kernel, stdlib, rabbit, amqp_client]}]}.
+   {applications, [kernel, stdlib, rabbit, amqp_client, rfc4627_jsonrpc]}]}.
