@@ -83,7 +83,7 @@ init([]) ->
         {ok, Value} ->
             Value;
         _         ->
-            io:format("no proxyauth config found, using default", []),
+            io:format("no proxyauth config found, using default ...", []),
             ?DEFAULT_CONFIG
     end,
     Endpoint = proplists:get_value(endpoint, Config),
