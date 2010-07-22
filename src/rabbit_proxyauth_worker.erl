@@ -78,6 +78,7 @@ start_link() ->
     gen_server:start_link({local, rabbitmq_proxyauth}, ?MODULE, [], []).
 
 init([]) ->
+    io:format("starting ~-60s ...", ["proxyauth plugin"]),
     Config = case application:get_env(rabbit, proxyauth) of
         {ok, Value} ->
             Value;
@@ -85,35 +86,26 @@ init([]) ->
             io:format("no proxyauth config found, using default", []),
             ?DEFAULT_CONFIG
     end,
-    io:format("Config: ~p~n", [Config]),
     Endpoint = proplists:get_value(endpoint, Config),
     {ok, Channel, Exchange, Queue} = connect_to_endpoint(Endpoint),
     State = #state{endpoint = Endpoint, channel = Channel, exchange = Exchange, queue = Queue},
-    io:format("State: ~p~n", [State]),
+    io:format("done~n", []),
     {ok, State}.
 
 handle_call(Msg, From, State = #state{message_count = MessageCount}) ->
     Id = MessageCount + 1,
     Message = build_message(Msg, Id),
-    send_request(State, Id, From, list_to_binary(rfc4627:encode(Message)));
-
-handle_call(_Msg, _From, State) ->
-    io:format("Call: ~p~n", [_Msg]),
-    {reply, ok, State}.
+    send_request(State, Id, From, list_to_binary(rfc4627:encode(Message))).
 
 handle_cast(_Msg, State) ->
-    io:format("Cast: ~p~n", [_Msg]),
     {noreply, State}.
 
 handle_info({#'basic.deliver'{}, #amqp_msg{payload = Payload}}, State) ->
-    io:format("Payload: ~p~n", [Payload]),
     {ok, {obj, Reply}, _} = rfc4627:decode(binary_to_list(Payload)),
-    io:format("Reply: ~p~n", [Reply]),
     NewOutstanding = send_reply(State, Reply),
     {noreply, State#state{outstanding = NewOutstanding}};
 
 handle_info(_Info, State) ->
-    io:format("Info: ~p~n", [_Info]),
     {noreply, State}.
 
 terminate(_Reason, _State) ->
