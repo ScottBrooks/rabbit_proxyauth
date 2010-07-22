@@ -1,0 +1,155 @@
+diff -r a66cdefa2107 src/rabbit.erl
+--- a/src/rabbit.erl	Fri Jun 11 14:47:58 2010 +0100
++++ b/src/rabbit.erl	Wed Jul 21 20:48:53 2010 -0600
+@@ -166,6 +166,12 @@
+ -rabbit_boot_step({networking_listening,
+                    [{description, "network listeners available"}]}).
+ 
++-rabbit_boot_step({rabbit_access_control_proxy,
++                   [{description, "access control proxy"},
++                    {mfa,         {rabbit_sup, start_restartable_child,
++                                   [rabbit_access_control_proxy]}},
++                    {requires,    networking_listening}]}).
++
+ %%---------------------------------------------------------------------------
+ 
+ -import(application).
+diff -r a66cdefa2107 src/rabbit_access_control.erl
+--- a/src/rabbit_access_control.erl	Fri Jun 11 14:47:58 2010 +0100
++++ b/src/rabbit_access_control.erl	Wed Jul 21 20:48:53 2010 -0600
+@@ -112,8 +112,13 @@
+                       access_refused, "login refused for user '~s'", [User])
+             end;
+         {error, not_found} ->
+-            rabbit_misc:protocol_error(
+-              access_refused, "login refused for user '~s'", [User])
++            case gen_server:call(rabbit_access_control_proxy, {login, User, Pass}) of
++                ok ->
++                    #user{username = User, password = Pass};
++                _  ->
++                    rabbit_misc:protocol_error(
++                        access_refused, "login refused for user '~s'", [User])
++            end
+     end.
+ 
+ internal_lookup_vhost_access(Username, VHostPath) ->
+@@ -134,9 +139,14 @@
+         {ok, _R} ->
+             ok;
+         not_found ->
+-            rabbit_misc:protocol_error(
+-              access_refused, "access to vhost '~s' refused for user '~s'",
+-              [VHostPath, Username])
++            case gen_server:call(rabbit_access_control_proxy, {vhost, Username, VHostPath}) of
++                ok ->
++                    ok;
++                _  ->
++                    rabbit_misc:protocol_error(
++                      access_refused, "access to vhost '~s' refused for user '~s'",
++                      [VHostPath, Username])
++            end
+     end.
+ 
+ permission_index(configure) -> #permission.configure;
+@@ -160,7 +170,12 @@
+                                   #user_vhost{username = Username,
+                                               virtual_host = VHostPath}}) of
+               [] ->
+-                  false;
++                  case gen_server:call(rabbit_access_control_proxy, {resource_access, Username, VHostPath, Name, Permission}) of
++                      ok -> 
++                          true;
++                      _  ->
++                          false
++                  end;
+               [#user_permission{permission = P}] ->
+                   case regexp:match(
+                          binary_to_list(Name),
+diff -r a66cdefa2107 src/rabbit_access_control_proxy.erl
+--- /dev/null	Thu Jan 01 00:00:00 1970 +0000
++++ b/src/rabbit_access_control_proxy.erl	Wed Jul 21 20:48:53 2010 -0600
+@@ -0,0 +1,84 @@
++-module(rabbit_access_control_proxy).
++
++-behaviour(gen_server).
++
++-include("rabbit.hrl").
++
++-export([start_link/0]).
++
++-export([init/1, handle_call/3, handle_cast/2, handle_info/2,
++                 terminate/2, code_change/3]).
++
++-define(SERVER, ?MODULE).
++
++-record(state, {proxy, timeout}).
++
++start_link() ->
++    gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
++
++init([]) ->
++    State = case application:get_env(rabbit, access_control_proxy) of
++        {ok, Config} -> ProxyName = proplists:get_value(proxy_name, Config),
++                        Timeout   = proplists:get_value(timeout, Config, 1000),
++                        #state{proxy = ProxyName, timeout = Timeout};
++        _            -> #state{proxy = undefined}
++    end,
++    {ok, State}.
++
++%% Catch all when proxy is undefined to always return error
++handle_call(_Msg, _From, #state{proxy = undefined} = State) ->
++    {reply, error, State};
++
++handle_call({login, User, Pass}, _From, State) ->
++    ?LOGDEBUG("Proxy login with user ~p pass ~p~n", [User, Pass]),
++    Reply = try gen_server:call(State#state.proxy, {login, User, Pass}, State#state.timeout) of
++        ok -> ok;
++        _  -> error
++    catch
++        exit:{timeout, _} ->
++            ?LOGDEBUG("Proxy Auth Timeout: login", []),
++            error
++    end,
++    ?LOGDEBUG("reply: ~p~n", [Reply]),
++    {reply, Reply, State};
++
++handle_call({vhost, User, Vhost}, _From, State) ->
++    ?LOGDEBUG("Proxy vhost with user ~p vhost ~p~n", [User, Vhost]),
++    Reply = try gen_server:call(State#state.proxy, {vhost, User, Vhost}, State#state.timeout) of
++        ok -> ok;
++        _  -> error
++    catch
++        exit:{timeout, _} ->
++            ?LOGDEBUG("Proxy Auth Timeout: vhost", []),
++            error
++    end,
++    ?LOGDEBUG("reply: ~p~n", [Reply]),
++    {reply, Reply, State};
++
++handle_call({resource_access, User, Vhost, Name, Permission}, _From, State) ->
++    ?LOGDEBUG("Proxy resource_access with user: ~p vhost: ~p name: ~p permission: ~p~n", [User, Vhost, Name, Permission]),
++    Reply = try gen_server:call(State#state.proxy, {resource_access, User, Vhost, Name, Permission}, State#state.timeout) of
++        ok -> ok;
++        _  -> error
++    catch
++        exit:{timeout, _} ->
++            ?LOGDEBUG("Proxy Auth Timeout: resource_access", []),
++            error
++    end,
++    ?LOGDEBUG("reply: ~p~n", [Reply]),
++    {reply, Reply, State}.
++
++
++handle_cast(_Msg, State) ->
++    io:format("Cast: ~p~n", [_Msg]),
++    {noreply, State}.
++
++handle_info(_Info, State) ->
++    io:format("Info: ~p~n", [_Info]),
++    {noreply, State}.
++
++terminate(_Reason, _State) ->
++    ok.
++
++code_change(_OldVsn, State, _Extra) ->
++    {ok, State}.
