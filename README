@@ -1,3 +1,204 @@
-I bet you expected something to be here.
+RabbitMQ Proxy Authentication Plugin:
 
-//TODO: Add stuff to read
+A proof of concept plugin to defer authentication.
+
+
+Installation:(parts taken from http://www.rabbitmq.com/plugin-development.html)
+
+ONLY 23 EASY STEPS
+
+# Checkout the rabbitmq-plugin directory tree
+$ hg clone http://hg.rabbitmq.com/rabbitmq-public-umbrella
+
+$ cd rabbitmq-public-umbrella
+# Download all the source
+$ make co
+
+# Checkout the RabbitMQ proxyauth plugin inside the rabbitmq-public-umbrella directory
+$ git clone git://github.com/Blaze74/rabbit_proxyauth.git rabbitmq-proxyauth
+$ cd rabbitmq-proxyauth
+
+# Patch RabbitMQ server source
+$ patch -p 1 -d ../rabbitmq-server < rabbitmq-server.patch
+
+$ cd ../rabbitmq-server
+# Compile RabbitMQ Server
+$ make
+
+$ cd ../rabbitmq-erlang-client
+# Compile RabbitMQ Client
+$ make
+
+$ cd ../erlang-rfc4627
+# Compile Erlang JSON library
+$ make
+
+$ cd ../rabbitmq-proxyauth
+# Compile RabbitMQ proxyuath plugin
+$ make
+
+$ cd ..
+$ mkdir -p rabbitmq-server/plugins
+$ cd rabbitmq-server/plugins
+$ ln -s ../../rabbitmq-proxyauth
+$ ln -s ../../rabbitmq-erlang-client
+$ ln -s ../../erlang-rfc4627
+$ cd ..
+$ scripts/rabbitmq-activate-plugins
+
+$ make run
+
+Assuming all of the above worked, the last few lines of the console output should look something like
+-- message delivery logic ready
+starting error log relay                                              ...done
+starting networking                                                   ...done
+-- network listeners available
+starting access control proxy                                         ...done
+
+broker running
+starting proxyauth plugin                                             ...no proxyauth config found, using default ...done
+Eshell V5.7.4  (abort with ^G)
+
+
+The key things to look for are
+  starting access control proxy
+  starting proxyauth plugin
+
+Right now this will not have really changed much of the server behaviour.  All it will try and do is
+pass off any failing authentication requests to the access control proxy, but it doesn't actually
+know to send that request to our proxyauth plugin.  We will configure that below.
+
+Configuration:
+
+The access control proxy looks for a proxy_name on startup, and timeout.  These values can be configured
+in the rabbitmq.config file like so.
+[
+  {rabbit, 
+    [
+      {access_control_proxy, 
+        [
+          {proxy_name, rabbitmq_proxyauth}, 
+          {timeout, 1000}
+        ]
+      }
+    ]
+  }
+].
+
+
+By default, the proxyauth plugin will connect as guest with the password guest to the vhost /, and send messages to the proxyauth exchange
+That, combined with the above looks like
+[
+  {rabbit, 
+    [
+      {access_control_proxy, 
+        [
+          {proxy_name, rabbitmq_proxyauth}, 
+          {timeout, 1000}
+        ]
+      },
+      {proxyauth, 
+        [
+          {endpoint, {<<"proxyauth">>, <<"sekrit">>, direct, 5672, <<"/auth">>, <<"proxyauth">>}}
+        ]
+      }
+    ]
+  }
+].
+
+This will tell the access_control_proxy to send the proxy requests to rabbitmq_proxyauth.
+
+And it will tell the proxyauth plugin to connect as the user proxyauth, with the password sekrit, directly to the /auth vhost
+and send messages to the proxyauth exchange.  This is probably a good configuration as far as security goes.
+
+Now when you start the server, you will see something along the lines of
+starting error log relay                                              ...done
+starting networking                                                   ...done
+-- network listeners available
+starting access control proxy                                         ...done
+
+broker running
+starting proxyauth plugin                                             ...done
+Eshell V5.7.4  (abort with ^G)
+
+
+Actually Using the thing:
+When a user tries to connect to RabbitMQ, and it fails, the request will be sent to the proxyauth exchange.
+The consumer should send it's messages to the amq.direct exchange, with the routing key of the reply_to property of the message.
+In the message recieved from the RabbitMQ server, there is an ID property.  This id must be returned as is in the reply.
+
+Here is a simulated log of the user "test" connecting to the server, and trying to bind to the queue "messages"
+
+
+Login Request: action = login
+
+Published to proxyauth exchange
+Header[reply_to]: amq.gen-Si5qTy20t8ptv/FzU795zQ==
+{
+  "id":     5,
+  "action": "login",
+  "user":   "test",
+  "pass":   "guest"
+}
+
+Published to amq.gen-Si5qTy20t8ptv/FzU795zQ==
+{
+  "code": 200,
+  "id":   5
+}
+
+Vhost request: action = vhost
+Published to proxyauth exchange
+Header[reply_to]: amq.gen-Si5qTy20t8ptv/FzU795zQ==
+{
+  "id":     6,
+  "action": "vhost",
+  "user":  "test",
+  "vhost":  "/"
+}
+
+Published to amq.gen-Si5qTy20t8ptv/FzU795zQ==
+{
+  "code": 200,
+  "id":   6
+}
+
+Permission Request to Read: action = resource_access
+Header[reply_to]: amq.gen-Si5qTy20t8ptv/FzU795zQ==
+{
+  "id":          11,
+  "action":      "resource_access",
+  "user":        "test",
+  "vhost":       "/",
+  "item":        "messages",
+  "permission":  "configure"
+}
+
+Published to amq.gen-Si5qTy20t8ptv/FzU795zQ==
+{
+  "code": 200,
+  "id":   11
+}
+
+Permission Request to Read: action = resource_access
+Header[reply_to]: amq.gen-Si5qTy20t8ptv/FzU795zQ==
+{
+  "id":          12,
+  "action":      "resource_access",
+  "user":        "test",
+  "vhost":       "/",
+  "item":        "messages",
+  "permission":  "read"
+}
+
+Published to amq.gen-Si5qTy20t8ptv/FzU795zQ==
+{
+  "code": 200,
+  "id":   12
+}
+
+
+As you can see, HTTP status codes are vaguely used here.  Currently a 200 means allow, and anything means deny.
+
+A sample auth client can be found at
+http://github.com/Blaze74/proxyauth.rb
